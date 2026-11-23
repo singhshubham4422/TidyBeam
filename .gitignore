@@ -1,0 +1,46 @@
+# Dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+src-tauri/target/
+src-tauri/gen/
+
+# Release artifacts are published through GitHub Releases, never committed
+release/
+*.msi
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+
+# Signing material must never be committed
+*.cer
+*.pfx
+*.p12
+*.key
+*.pem
+*.p8
+*.mobileprovision
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local environment
+*.local
+.env
+.env.*
+
+# Editors and OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.sw?
