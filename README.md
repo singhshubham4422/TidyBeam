@@ -12,7 +12,7 @@ Everything runs on your computer — no account, no telemetry, no network.
 [![License: MIT](https://img.shields.io/github/license/singhshubham4422/TidyBeam)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-2563eb)
 
-[**Download**](#download) · [Features](#features) · [Shortcuts](#keyboard-shortcuts) · [Build from source](#build-from-source) · [Contributing](CONTRIBUTING.md)
+[**Download**](#download) · [Microsoft Store](https://apps.microsoft.com/detail/9NXSC9HV5S12) · [Features](#features) · [Shortcuts](#keyboard-shortcuts) · [Build from source](#build-from-source) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -24,11 +24,15 @@ Get the latest version for your computer. All files are also listed on the [Rele
 
 | | Intel / AMD (x64) | ARM64 |
 |---|---|---|
-| **Windows 10 / 11** | [Installer (.exe)](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-windows-x64-setup.exe) · [MSI](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-windows-x64.msi) | [Installer (.exe)](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-windows-arm64-setup.exe) |
+| **Windows 10 / 11** | [**Microsoft Store**](https://apps.microsoft.com/detail/9NXSC9HV5S12) · [Installer (.exe)](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-windows-x64-setup.exe) · [MSI](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-windows-x64.msi) | [**Microsoft Store**](https://apps.microsoft.com/detail/9NXSC9HV5S12) · [Installer (.exe)](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-windows-arm64-setup.exe) |
 | **macOS 10.15+** | [Intel (.dmg)](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-macos-x64.dmg) | [Apple silicon (.dmg)](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-macos-arm64.dmg) |
 | **Linux** | [AppImage](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-linux-x64.AppImage) · [.deb](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-linux-x64.deb) · [.rpm](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-linux-x64.rpm) | [AppImage](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-linux-arm64.AppImage) · [.deb](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-linux-arm64.deb) · [.rpm](https://github.com/singhshubham4422/TidyBeam/releases/latest/download/TidyBeam-linux-arm64.rpm) |
 
-TidyBeam will also be available from the **Microsoft Store**, which installs and updates it automatically.
+<p align="center">
+  <a href="https://apps.microsoft.com/detail/9NXSC9HV5S12"><img src="https://get.microsoft.com/images/en-us%20dark.svg" width="200" alt="Get TidyBeam from the Microsoft Store" /></a>
+</p>
+
+On Windows, the **Microsoft Store** is the recommended way to install TidyBeam: it's signed by Microsoft and updates automatically. The direct installers are there if you can't use the Store.
 
 > **Note:** the direct links point to the latest *stable* release. Beta versions appear only on the [Releases page](https://github.com/singhshubham4422/TidyBeam/releases).
 

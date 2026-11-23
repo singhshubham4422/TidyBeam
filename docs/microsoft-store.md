@@ -1,5 +1,7 @@
 # Publishing TidyBeam to the Microsoft Store
 
+**Store listing:** <https://apps.microsoft.com/detail/9NXSC9HV5S12> (Store ID `9NXSC9HV5S12`, package family `SwiftLabs.TidyBeam_eha7verb3j2br`). The name is reserved and the identity variables are already set in GitHub; the remaining steps are the first manual submission and API access.
+
 `.github/workflows/store.yml` turns each **stable** GitHub release into an MSIX bundle (x64 + ARM64) and submits it to the Microsoft Store. The Store signs the package and updates installed copies automatically, so Store users always get the latest version without a code-signing certificate.
 
 Pre-releases (tags such as `v0.3.0-beta.1`) are skipped. You can also run the workflow by hand from **Actions → Microsoft Store → Run workflow** with any tag.
