@@ -126,7 +126,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
           # Version-free names keep the README's /releases/latest/download/ links stable.
-          releaseAssetNamePattern: TidyBeam-${{ matrix.asset }}[setup][ext]
+          assetNamePattern: TidyBeam-${{ matrix.asset }}[setup][ext]
 
   checksums:
     name: Publish checksums
