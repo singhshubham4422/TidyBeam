@@ -5,7 +5,8 @@
 First cross-platform release candidate.
 
 ### Added
-- Windows, macOS and Linux builds (MSI/NSIS, DMG, AppImage/deb/rpm) from CI.
+- Windows (x64, ARM64), macOS (Apple silicon, Intel) and Linux (x64, ARM64) builds from CI, with stable download links.
+- Microsoft Store pipeline: stable releases are packaged as an MSIX bundle and submitted automatically.
 - New interface: simpler layout, light and dark themes, accent colors, compact rows, Settings page.
 - Real back/forward history per tab, breadcrumbs built from the actual path on every OS, `~` in the location box.
 - Grid view with lazy image thumbnails; previews for images, text, video and audio.
