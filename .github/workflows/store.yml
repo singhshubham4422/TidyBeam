@@ -1,0 +1,152 @@
+name: Microsoft Store
+
+# Builds an MSIX bundle (x64 + ARM64) and submits it to the Microsoft Store.
+# Runs automatically when a stable release is published, or manually for any tag.
+# The Store signs the package itself and keeps installed copies up to date.
+# Setup instructions: docs/microsoft-store.md
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package, for example v0.3.0
+        required: true
+      submit:
+        description: Submit to the Store (otherwise only build the bundle)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: MSIX (${{ matrix.arch }})
+    # Store builds only for stable releases (tags without a "-beta"-style suffix).
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: store-${{ matrix.target }}
+
+      - run: npm ci
+
+      - name: Build app binary
+        run: npm run tauri build -- --target ${{ matrix.target }} --no-bundle
+
+      - name: Create MSIX package
+        shell: pwsh
+        env:
+          IDENTITY_NAME: ${{ vars.MSSTORE_IDENTITY_NAME }}
+          PUBLISHER: ${{ vars.MSSTORE_PUBLISHER }}
+          PUBLISHER_DISPLAY_NAME: ${{ vars.MSSTORE_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          if (-not $env:IDENTITY_NAME -or -not $env:PUBLISHER -or -not $env:PUBLISHER_DISPLAY_NAME) {
+            throw "Set the MSSTORE_IDENTITY_NAME, MSSTORE_PUBLISHER and MSSTORE_PUBLISHER_DISPLAY_NAME repository variables (see docs/microsoft-store.md)."
+          }
+          # Store versions are major.minor.patch.0; pre-release suffixes are dropped.
+          $semver = ($env:TAG -replace '^v', '') -replace '-.*$', ''
+          $version = "$semver.0"
+
+          $layout = "msix-layout"
+          New-Item -ItemType Directory -Force "$layout/Assets" | Out-Null
+          Copy-Item "src-tauri/target/${{ matrix.target }}/release/tidybeam.exe" "$layout/tidybeam.exe"
+          foreach ($icon in "StoreLogo", "Square44x44Logo", "Square71x71Logo", "Square150x150Logo", "Square310x310Logo") {
+            Copy-Item "src-tauri/icons/$icon.png" "$layout/Assets/$icon.png"
+          }
+          (Get-Content packaging/msix/AppxManifest.xml -Raw) `
+            -replace '\{\{IDENTITY_NAME\}\}', [Security.SecurityElement]::Escape($env:IDENTITY_NAME) `
+            -replace '\{\{PUBLISHER\}\}', [Security.SecurityElement]::Escape($env:PUBLISHER) `
+            -replace '\{\{PUBLISHER_DISPLAY_NAME\}\}', [Security.SecurityElement]::Escape($env:PUBLISHER_DISPLAY_NAME) `
+            -replace '\{\{VERSION\}\}', $version `
+            -replace '\{\{ARCH\}\}', '${{ matrix.arch }}' |
+            Set-Content "$layout/AppxManifest.xml" -Encoding utf8
+
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          New-Item -ItemType Directory -Force out | Out-Null
+          & $makeappx.FullName pack /d $layout /p "out/TidyBeam_${version}_${{ matrix.arch }}.msix" /o
+          if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msix-${{ matrix.arch }}
+          path: out/*.msix
+          if-no-files-found: error
+
+  bundle-and-submit:
+    name: Bundle and submit
+    needs: package
+    runs-on: windows-latest
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      SUBMIT: ${{ github.event_name == 'release' || inputs.submit }}
+      HAS_STORE_CREDENTIALS: ${{ secrets.MSSTORE_CLIENT_SECRET != '' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: msix-*
+          path: msix
+          merge-multiple: true
+
+      - name: Create MSIX bundle
+        id: bundle
+        shell: pwsh
+        run: |
+          $semver = ($env:TAG -replace '^v', '') -replace '-.*$', ''
+          $version = "$semver.0"
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          $bundle = "TidyBeam_$version.msixbundle"
+          & $makeappx.FullName bundle /d msix /p $bundle /bv $version /o
+          if ($LASTEXITCODE -ne 0) { throw "makeappx bundle failed" }
+          "path=$bundle" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msixbundle
+          path: ${{ steps.bundle.outputs.path }}
+
+      - uses: microsoft/setup-msstore-cli@v1
+        if: env.SUBMIT == 'true' && env.HAS_STORE_CREDENTIALS == 'true'
+
+      - name: Submit to Microsoft Store
+        if: env.SUBMIT == 'true' && env.HAS_STORE_CREDENTIALS == 'true'
+        shell: pwsh
+        env:
+          TENANT_ID: ${{ secrets.MSSTORE_TENANT_ID }}
+          SELLER_ID: ${{ secrets.MSSTORE_SELLER_ID }}
+          CLIENT_ID: ${{ secrets.MSSTORE_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.MSSTORE_CLIENT_SECRET }}
+          PRODUCT_ID: ${{ vars.MSSTORE_PRODUCT_ID }}
+        run: |
+          msstore reconfigure --tenantId $env:TENANT_ID --sellerId $env:SELLER_ID --clientId $env:CLIENT_ID --clientSecret $env:CLIENT_SECRET
+          msstore publish "${{ steps.bundle.outputs.path }}" -id $env:PRODUCT_ID
+
+      - name: Explain skipped submission
+        if: env.SUBMIT == 'true' && env.HAS_STORE_CREDENTIALS != 'true'
+        run: echo "::notice::MSIX bundle built but not submitted. Add the MSSTORE_* secrets to submit automatically (see docs/microsoft-store.md)."
