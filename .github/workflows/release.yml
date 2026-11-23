@@ -1,0 +1,137 @@
+name: Release
+
+# Push a version tag (for example v0.3.0 or v0.3.0-beta.1) to build installers for every
+# platform and create a draft GitHub release. Review the draft, then publish it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+          - label: Windows ARM64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            args: --target aarch64-pc-windows-msvc --bundles nsis
+          - label: macOS Apple silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - label: macOS Intel
+            os: macos-latest
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
+          - label: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: --target x86_64-unknown-linux-gnu
+          - label: Linux ARM64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            args: --target aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    env:
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libxdo-dev rpm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      # Optional Windows signing: add WINDOWS_CERTIFICATE (base64 .pfx) and WINDOWS_CERTIFICATE_PASSWORD secrets.
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows' && env.HAS_WINDOWS_CERT == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $bytes = [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          $path = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($path, $bytes)
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $path
+          $config = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path src-tauri/tauri.signing.json -Value $config -Encoding utf8
+          "SIGNING_ARGS=--config src-tauri/tauri.signing.json" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # Optional macOS signing and notarization: add the APPLE_* secrets. They're only exported
+      # when present, because empty values make the Tauri CLI try (and fail) to sign.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            echo "$name=${!name}" >> "$GITHUB_ENV"
+          done
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: TidyBeam ${{ github.ref_name }}
+          releaseBody: |
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for what's new.
+            Verify downloads with `SHA256SUMS.txt`.
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: ${{ matrix.args }} ${{ env.SIGNING_ARGS }}
+
+  checksums:
+    name: Publish checksums
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download release assets and upload SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir assets && cd assets
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --pattern '*'
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "${GITHUB_REF_NAME}" SHA256SUMS.txt --repo "${GITHUB_REPOSITORY}" --clobber
