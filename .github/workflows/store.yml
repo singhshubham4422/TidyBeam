@@ -37,11 +37,11 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -93,7 +93,7 @@ jobs:
           & $makeappx.FullName pack /d $layout /p "out/TidyBeam_${version}_${{ matrix.arch }}.msix" /o
           if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed" }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: msix-${{ matrix.arch }}
           path: out/*.msix
@@ -108,7 +108,7 @@ jobs:
       SUBMIT: ${{ github.event_name == 'release' || inputs.submit }}
       HAS_STORE_CREDENTIALS: ${{ secrets.MSSTORE_CLIENT_SECRET != '' }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: msix-*
           path: msix
@@ -126,7 +126,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "makeappx bundle failed" }
           "path=$bundle" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: msixbundle
           path: ${{ steps.bundle.outputs.path }}
