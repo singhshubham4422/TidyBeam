@@ -32,7 +32,7 @@ jwalk = "0.9"
 notify = "8"
 rayon = "1"
 rusqlite = { version = "0.43", features = ["bundled-full", "fallible_uint"] }
-sysinfo = "0.37"
+sysinfo = "0.40"
 tidybeam-core = { path = "crates/tidybeam-core" }
 trash = "5"
 walkdir = "2"
