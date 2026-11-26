@@ -44,3 +44,7 @@ pnpm-debug.log*
 Thumbs.db
 *.suo
 *.sw?
+
+# Markdown docs (keep README.md tracked)
+*.md
+!README.md
