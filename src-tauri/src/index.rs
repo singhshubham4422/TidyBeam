@@ -220,7 +220,7 @@ impl IndexDb {
         let mut connection = self.write.lock().map_err(|e| e.to_string())?;
         let transaction = connection.transaction().map_err(|e| e.to_string())?;
         for (path, walk) in changes {
-            if !path.starts_with(root) {
+            if !platform::same_or_descendant(path, root) {
                 continue;
             }
             let path_text = platform::path_string(path);
@@ -271,15 +271,20 @@ impl IndexDb {
             .execute("DELETE FROM roots WHERE root = ?1", [root])
             .map_err(|e| e.to_string())?;
         // Keep rows that another, enclosing root still covers.
-        let covered: Option<String> = transaction
-            .query_row(
-                "SELECT root FROM roots WHERE ?1 = root OR substr(?1, 1, length(root)) = root LIMIT 1",
-                [root],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        if covered.is_none() {
+        let other_roots: Vec<String> = {
+            let mut stmt = transaction
+                .prepare("SELECT root FROM roots")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        };
+        let covered = other_roots
+            .iter()
+            .any(|other| platform::same_or_descendant(Path::new(root), Path::new(other)));
+        if !covered {
             transaction
                 .execute(
                     &format!("DELETE FROM files WHERE {IN_ROOT}"),
@@ -414,6 +419,29 @@ impl IndexDb {
 }
 
 fn upsert(connection: &Connection, entry: &FileEntry, generation: i64) -> Result<(), String> {
+    let mut check = connection
+        .prepare_cached("SELECT size, modified, is_dir, hidden FROM files WHERE path = ?1")
+        .map_err(|e| e.to_string())?;
+    let existing: Option<(u64, u64, bool, bool)> = check
+        .query_row([&entry.path], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some((size, modified, is_dir, hidden)) = existing
+        && size == entry.size
+        && modified == entry.modified
+        && is_dir == entry.is_dir
+        && hidden == entry.hidden
+    {
+        let mut touch = connection
+            .prepare_cached("UPDATE files SET generation = ?2 WHERE path = ?1")
+            .map_err(|e| e.to_string())?;
+        touch
+            .execute(params![entry.path, generation])
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     let mut statement = connection
         .prepare_cached(
             "INSERT INTO files(path, name, extension, is_dir, size, modified, hidden, generation)

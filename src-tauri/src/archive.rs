@@ -167,7 +167,8 @@ pub fn extract(path: &Path, destination: &Path) -> Result<usize, String> {
             free / 1_048_576
         ));
     }
-    for (relative, is_dir, _) in &plans {
+    let mut validated_plans = Vec::with_capacity(plans.len());
+    for (relative, is_dir, declared) in &plans {
         for parent in relative.ancestors().skip(1) {
             if !parent.as_os_str().is_empty()
                 && seen.get(&platform::normalized_key(parent)) == Some(&false)
@@ -187,16 +188,16 @@ pub fn extract(path: &Path, destination: &Path) -> Result<usize, String> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
         }
+        validated_plans.push((relative.clone(), output, *is_dir, *declared));
     }
 
     let mut created_files = Vec::<PathBuf>::new();
     let mut created_dirs = Vec::<PathBuf>::new();
     let result = (|| -> Result<usize, String> {
-        for (index, (relative, is_dir, declared)) in plans.iter().enumerate() {
+        for (index, (relative, output, is_dir, declared)) in validated_plans.iter().enumerate() {
             let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
-            let output = safe_output(&root, relative)?;
             if *is_dir {
-                create_dirs(&root, &output, &mut created_dirs)?;
+                create_dirs(&root, output, &mut created_dirs)?;
                 continue;
             }
             if let Some(parent) = output.parent() {
@@ -205,7 +206,7 @@ pub fn extract(path: &Path, destination: &Path) -> Result<usize, String> {
             let mut out = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
-                .open(&output)
+                .open(output)
                 .map_err(|e| e.to_string())?;
             created_files.push(output.clone());
             // Never write more than the entry declares, whatever the stream produces.
@@ -222,10 +223,10 @@ pub fn extract(path: &Path, destination: &Path) -> Result<usize, String> {
             #[cfg(unix)]
             if let Some(mode) = entry.unix_mode() {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&output, fs::Permissions::from_mode(mode & 0o777));
+                let _ = fs::set_permissions(output, fs::Permissions::from_mode(mode & 0o777));
             }
         }
-        Ok(plans.len())
+        Ok(validated_plans.len())
     })();
     if result.is_err() {
         for file in created_files.iter().rev() {

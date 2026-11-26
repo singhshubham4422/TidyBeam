@@ -371,6 +371,62 @@ pub fn trash_one(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Submits paths in a single OS batch (`trash::delete_all`), falling back to binary split
+/// only when a locked/missing item causes a batch failure.
+pub fn trash_batch(paths: &[PathBuf]) -> (usize, Vec<(PathBuf, String)>) {
+    let mut existing = Vec::with_capacity(paths.len());
+    let mut failed = Vec::new();
+    for path in paths {
+        if fs::symlink_metadata(path).is_err() {
+            continue;
+        }
+        if is_protected(path) {
+            failed.push((
+                path.clone(),
+                format!("{} can't be moved to the {}", path.display(), trash_name()),
+            ));
+        } else {
+            existing.push(path.clone());
+        }
+    }
+    if existing.is_empty() {
+        return (0, failed);
+    }
+    let mut trashed = 0usize;
+    let ctx = trash_context();
+    trash_slice(&ctx, &existing, &mut trashed, &mut failed);
+    (trashed, failed)
+}
+
+fn trash_slice(
+    ctx: &trash::TrashContext,
+    slice: &[PathBuf],
+    trashed: &mut usize,
+    failed: &mut Vec<(PathBuf, String)>,
+) {
+    if slice.is_empty() {
+        return;
+    }
+    if ctx.delete_all(slice).is_ok() {
+        *trashed += slice.len();
+        return;
+    }
+    if slice.len() == 1 {
+        let p = &slice[0];
+        if fs::symlink_metadata(p).is_err() {
+            return;
+        }
+        match ctx.delete(p) {
+            Ok(()) => *trashed += 1,
+            Err(e) => failed.push((p.clone(), e.to_string())),
+        }
+        return;
+    }
+    let mid = slice.len() / 2;
+    trash_slice(ctx, &slice[..mid], trashed, failed);
+    trash_slice(ctx, &slice[mid..], trashed, failed);
+}
+
 pub fn delete_permanently(path: &Path) -> Result<(), String> {
     if is_protected(path) {
         return Err(format!("{} can't be deleted", path.display()));
@@ -380,11 +436,81 @@ pub fn delete_permanently(path: &Path) -> Result<(), String> {
         // Remove only the link, never what it points to.
         fs::remove_file(path).or_else(|_| fs::remove_dir(path))
     } else if metadata.is_dir() {
-        fs::remove_dir_all(path)
+        fast_remove_dir_all(path)
     } else {
         fs::remove_file(path)
     };
     result.map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Parallel leaf unlink + bottom-up directory removal, with optional same-volume stage-and-drop.
+pub fn fast_remove_dir_all(path: &Path) -> io::Result<()> {
+    use rayon::prelude::*;
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    for entry in walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let ft = entry.file_type();
+        if ft.is_dir() && !ft.is_symlink() {
+            dirs.push(entry.into_path());
+        } else {
+            files.push(entry.into_path());
+        }
+    }
+    files.par_iter().try_for_each(fs::remove_file)?;
+    for dir in dirs.into_iter().rev() {
+        fs::remove_dir(&dir)?;
+    }
+    Ok(())
+}
+
+/// Atomically renames a directory into a hidden sibling staging folder on the same volume
+/// and unlinks its contents on a background rayon pool.
+pub fn stage_and_drop_dir(path: &Path) -> Result<(), String> {
+    if is_protected(path) {
+        return Err(format!("{} can't be deleted", path.display()));
+    }
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return delete_permanently(path);
+    }
+    let Some(parent) = path.parent() else {
+        return delete_permanently(path);
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let staged = parent.join(format!(".tidybeam-drop-{}-{nonce}", std::process::id()));
+    if fs::rename(path, &staged).is_ok() {
+        std::thread::Builder::new()
+            .name("tidybeam-drop".into())
+            .spawn(move || {
+                let _ = fast_remove_dir_all(&staged);
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        delete_permanently(path)
+    }
+}
+
+/// Lowers the current thread's OS scheduling priority so background scans keep the UI responsive.
+pub fn lower_thread_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::nice(10);
+    }
 }
 
 pub fn is_cross_device(error: &io::Error) -> bool {
@@ -528,5 +654,33 @@ mod safety_tests {
         ));
         assert!(trash_one(root).is_err());
         assert!(delete_permanently(root).is_err());
+    }
+
+    #[test]
+    fn fast_remove_and_stage_drop_work_in_temp() {
+        let dir = std::env::temp_dir().join(format!("tidybeam-drop-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested").join("a.txt"), b"hello").unwrap();
+        fs::write(dir.join("b.txt"), b"world").unwrap();
+        fast_remove_dir_all(&dir).unwrap();
+        assert!(!dir.exists());
+
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub").join("c.txt"), b"ok").unwrap();
+        stage_and_drop_dir(&dir).unwrap();
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn trash_batch_rejects_protected_paths() {
+        let root = if cfg!(windows) {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
+        let (trashed, failed) = trash_batch(&[root]);
+        assert_eq!(trashed, 0);
+        assert_eq!(failed.len(), 1);
     }
 }

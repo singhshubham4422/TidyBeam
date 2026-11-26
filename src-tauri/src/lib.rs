@@ -51,6 +51,7 @@ struct PlatformInfo {
     separator: char,
     home: String,
     version: String,
+    runtime: tidybeam_core::capabilities::RuntimeCapabilities,
 }
 
 #[tauri::command]
@@ -67,6 +68,7 @@ fn platform_info(app: AppHandle) -> PlatformInfo {
         separator: std::path::MAIN_SEPARATOR,
         home: platform::path_string(&home(&app)),
         version: app.package_info().version.to_string(),
+        runtime: tidybeam_core::capabilities::detect(),
     }
 }
 
@@ -199,6 +201,50 @@ async fn list_entries(
         )
     })
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn list_entries_range(
+    app: AppHandle,
+    snapshots: State<'_, DirectorySnapshots>,
+    path: String,
+    offset: usize,
+    limit: usize,
+    show_hidden: bool,
+    sort: String,
+    descending: bool,
+    filter: String,
+) -> CmdResult<listing::ListResult> {
+    let snapshots = snapshots.inner().clone();
+    let directory = resolve(&app, &path)?;
+    blocking(move || {
+        listing::list_entries_range(
+            &snapshots,
+            &directory,
+            ListRequest {
+                offset,
+                limit,
+                show_hidden,
+                sort: SortKey::parse(&sort),
+                descending,
+                filter,
+                force: false,
+            },
+        )
+    })
+    .await
+}
+
+#[tauri::command]
+async fn thumbnail_path(app: AppHandle, path: String) -> CmdResult<String> {
+    let cache_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("thumbnails");
+    let source = PathBuf::from(path);
+    blocking(move || listing::thumbnail_path(&source, &cache_dir)).await
 }
 
 #[tauri::command]
@@ -341,21 +387,16 @@ async fn trash_paths(
     paths: Vec<String>,
 ) -> CmdResult<TrashResult> {
     let result = blocking(move || {
-        let mut result = TrashResult {
-            trashed: 0,
-            failed: Vec::new(),
-        };
-        for raw in paths {
-            let path = PathBuf::from(&raw);
-            if fs::symlink_metadata(&path).is_err() {
-                continue;
-            }
-            match platform::trash_one(&path) {
-                Ok(()) => result.trashed += 1,
-                Err(error) => result.failed.push(FailedItem { path: raw, error }),
-            }
-        }
-        Ok(result)
+        let path_bufs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let (trashed, failed_pairs) = platform::trash_batch(&path_bufs);
+        let failed = failed_pairs
+            .into_iter()
+            .map(|(p, error)| FailedItem {
+                path: platform::path_string(&p),
+                error,
+            })
+            .collect();
+        Ok(TrashResult { trashed, failed })
     })
     .await?;
     let mut set = failures.0.lock().map_err(|e| e.to_string())?;
@@ -393,7 +434,7 @@ async fn delete_permanently(
         let mut deleted = 0;
         let mut errors = Vec::new();
         for raw in allowed {
-            match platform::delete_permanently(Path::new(&raw)) {
+            match platform::stage_and_drop_dir(Path::new(&raw)) {
                 Ok(()) => deleted += 1,
                 Err(error) => errors.push(error),
             }
@@ -539,17 +580,33 @@ fn start_transfer(
                 last_bytes: 0,
             };
             reporter.emit("running", None);
-            reporter.progress.total_bytes = sources
-                .iter()
-                .map(|s| transfer::path_size(Path::new(s)))
-                .fold(0, u64::saturating_add);
-            let result = transfer::run(
-                &sources,
-                Path::new(&destination),
-                move_items,
-                conflict,
-                &mut reporter,
-            );
+            let mut sized_sources = Vec::with_capacity(sources.len());
+            let mut total_bytes = 0u64;
+            let mut prep_cancelled = false;
+            for s in &sources {
+                match transfer::path_size_cancellable(Path::new(s), &control.cancelled) {
+                    Ok(sz) => {
+                        total_bytes = total_bytes.saturating_add(sz);
+                        sized_sources.push((s.clone(), Some(sz)));
+                    }
+                    Err(_) => {
+                        prep_cancelled = true;
+                        break;
+                    }
+                }
+            }
+            reporter.progress.total_bytes = total_bytes;
+            let result = if prep_cancelled {
+                Err("Cancelled".into())
+            } else {
+                transfer::run_with_sizes(
+                    &sized_sources,
+                    Path::new(&destination),
+                    move_items,
+                    conflict,
+                    &mut reporter,
+                )
+            };
             match result {
                 Ok(summary) => {
                     let mut message = format!("{} done", summary.completed);
@@ -680,46 +737,450 @@ async fn delete_rule(
 
 // ---------- Analysis ----------
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct AnalysisProgress {
-    scan_id: String,
-    files_scanned: u64,
-    folders_scanned: u64,
+struct AnalysisCacheState(Mutex<Option<Arc<analysis::AnalysisCacheDb>>>);
+
+impl Default for AnalysisCacheState {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+fn analysis_cache_db(app: &AppHandle) -> Option<Arc<analysis::AnalysisCacheDb>> {
+    let state = app.state::<AnalysisCacheState>();
+    let mut slot = state.0.lock().ok()?;
+    if let Some(db) = slot.as_ref() {
+        return Some(db.clone());
+    }
+    let directory = app.path().app_local_data_dir().ok()?;
+    fs::create_dir_all(&directory).ok()?;
+    let db =
+        Arc::new(analysis::AnalysisCacheDb::open(&directory.join("analysis-cache.sqlite3")).ok()?);
+    *slot = Some(db.clone());
+    Some(db)
+}
+
+#[tauri::command]
+async fn get_cached_analysis(
+    app: AppHandle,
+    snapshots: State<'_, analysis::AnalysisSnapshots>,
+    path: String,
+) -> CmdResult<Option<analysis::Analysis>> {
+    let root = resolve(&app, &path)?;
+    let snapshots = snapshots.inner().clone();
+    blocking(move || Ok(snapshots.get(&root))).await
+}
+
+#[tauri::command]
+fn cancel_analysis(tasks: State<'_, analysis::AnalysisTasks>, scan_id: String) -> CmdResult<()> {
+    tasks.cancel(&scan_id);
+    Ok(())
 }
 
 #[tauri::command]
 async fn analyze_folder(
     app: AppHandle,
+    snapshots: State<'_, analysis::AnalysisSnapshots>,
+    tasks: State<'_, analysis::AnalysisTasks>,
     path: String,
     scan_id: String,
+    force: Option<bool>,
 ) -> CmdResult<analysis::Analysis> {
     let root = resolve(&app, &path)?;
-    blocking(move || {
-        analysis::analyze(&root, |files, folders| {
-            let _ = app.emit(
-                "analysis-progress",
-                AnalysisProgress {
-                    scan_id: scan_id.clone(),
-                    files_scanned: files,
-                    folders_scanned: folders,
-                },
-            );
-        })
+    let snapshots = snapshots.inner().clone();
+    if !force.unwrap_or(false)
+        && let Some(cached) = snapshots.get(&root)
+    {
+        return Ok(cached);
+    }
+    if force.unwrap_or(false) {
+        snapshots.invalidate(&root);
+    }
+    let cancel = tasks.register(&scan_id);
+    let cache_db = analysis_cache_db(&app);
+    let app_handle = app.clone();
+    let sid = scan_id.clone();
+    let res = blocking(move || {
+        analysis::analyze_cancellable(
+            &root,
+            &sid,
+            &cancel,
+            Some(&snapshots),
+            cache_db.as_deref(),
+            |progress| {
+                let _ = app_handle.emit("analysis-progress", progress);
+            },
+        )
     })
-    .await
+    .await;
+    tasks.finish(&scan_id);
+    res
 }
 
 #[tauri::command]
 async fn find_duplicates(app: AppHandle, path: String) -> CmdResult<Vec<analysis::DuplicateGroup>> {
     let root = resolve(&app, &path)?;
-    blocking(move || analysis::duplicates(&root)).await
+    let cache_db = analysis_cache_db(&app);
+    blocking(move || analysis::duplicates_with_cache(&root, cache_db.as_deref())).await
 }
 
 #[tauri::command]
 async fn scan_cleanup(app: AppHandle) -> CmdResult<Vec<analysis::CleanupCandidate>> {
     let home = home(&app);
     blocking(move || Ok(analysis::cleanup_candidates(&home))).await
+}
+
+#[tauri::command]
+async fn scan_deep_cleanup(
+    app: AppHandle,
+    session: State<'_, tidybeam_core::cleaner::CleanerSession>,
+    force: Option<bool>,
+) -> CmdResult<Vec<tidybeam_core::cleaner::CleanerRuleSummary>> {
+    if !force.unwrap_or(false)
+        && let Some(cached) = session.cached_summaries()
+    {
+        return Ok(cached);
+    }
+    let home = home(&app);
+    let handle = app.clone();
+    blocking(move || {
+        let sess = handle.state::<tidybeam_core::cleaner::CleanerSession>();
+        Ok(tidybeam_core::cleaner::scan_deep_cleanup(
+            &home,
+            Some(&sess),
+            |rule| {
+                let _ = handle.emit("cleaner-rule", rule);
+            },
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+fn get_cleaner_items(
+    session: State<'_, tidybeam_core::cleaner::CleanerSession>,
+    rule_id: String,
+    offset: usize,
+    limit: usize,
+) -> Vec<tidybeam_core::cleaner::CleanerFileItem> {
+    session.get_items(&rule_id, offset, limit)
+}
+
+#[tauri::command]
+async fn clean_rules(
+    app: AppHandle,
+    session: State<'_, tidybeam_core::cleaner::CleanerSession>,
+    rule_ids: Vec<String>,
+    permanent: bool,
+) -> CmdResult<TrashResult> {
+    let paths = session.paths_for_rules(&rule_ids);
+    let res = blocking(move || {
+        let path_bufs: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+        if permanent {
+            let mut trashed = 0usize;
+            let mut failed = Vec::new();
+            for p in path_bufs {
+                match platform::stage_and_drop_dir(&p) {
+                    Ok(()) => trashed += 1,
+                    Err(error) => failed.push(FailedItem {
+                        path: platform::path_string(&p),
+                        error,
+                    }),
+                }
+            }
+            Ok(TrashResult { trashed, failed })
+        } else {
+            let (trashed, failed_pairs) = platform::trash_batch(&path_bufs);
+            let failed = failed_pairs
+                .into_iter()
+                .map(|(p, error)| FailedItem {
+                    path: platform::path_string(&p),
+                    error,
+                })
+                .collect();
+            Ok(TrashResult { trashed, failed })
+        }
+    })
+    .await?;
+    // Refresh cached summaries after cleaning
+    let home = home(&app);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let sess = handle.state::<tidybeam_core::cleaner::CleanerSession>();
+        let _ = tidybeam_core::cleaner::scan_deep_cleanup(&home, Some(&sess), |_| {});
+    });
+    Ok(res)
+}
+
+#[tauri::command]
+async fn vacuum_sqlite_targets(paths: Vec<String>) -> CmdResult<u64> {
+    blocking(move || {
+        let mut reclaimed = 0u64;
+        for p in paths {
+            if let Ok(bytes) = tidybeam_core::sqlite_opt::vacuum_sqlite(Path::new(&p)) {
+                reclaimed = reclaimed.saturating_add(bytes);
+            }
+        }
+        Ok(reclaimed)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn clean_cookies_whitelist(paths: Vec<String>, whitelist: Vec<String>) -> CmdResult<usize> {
+    blocking(move || {
+        let mut deleted = 0usize;
+        for p in paths {
+            if let Ok(n) =
+                tidybeam_core::sqlite_opt::clean_cookies_with_whitelist(Path::new(&p), &whitelist)
+            {
+                deleted = deleted.saturating_add(n);
+            }
+        }
+        Ok(deleted)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn empty_os_trash() -> CmdResult<()> {
+    blocking(tidybeam_core::cleaner::empty_os_trash).await
+}
+
+// ---------- System Monitor, Startup & Health ----------
+
+#[tauri::command]
+fn system_snapshot(
+    monitor: State<'_, tidybeam_core::system_monitor::MonitorState>,
+) -> tidybeam_core::system_monitor::SystemSnapshot {
+    monitor.snapshot()
+}
+
+#[tauri::command]
+async fn list_processes(
+    app: AppHandle,
+) -> CmdResult<Vec<tidybeam_core::system_monitor::ProcessEntry>> {
+    blocking(move || {
+        let monitor = app.state::<tidybeam_core::system_monitor::MonitorState>();
+        Ok(monitor.processes())
+    })
+    .await
+}
+
+#[tauri::command]
+fn terminate_process(
+    monitor: State<'_, tidybeam_core::system_monitor::MonitorState>,
+    pid: u32,
+) -> CmdResult<()> {
+    monitor.terminate_process(pid)
+}
+
+#[tauri::command]
+async fn list_startup_items(
+    app: AppHandle,
+) -> CmdResult<Vec<tidybeam_core::os_adapters::StartupItem>> {
+    let home = home(&app);
+    blocking(move || Ok(tidybeam_core::os_adapters::list_startup_items(&home))).await
+}
+
+#[tauri::command]
+async fn toggle_startup_item(id: String, enable: bool) -> CmdResult<()> {
+    blocking(move || tidybeam_core::os_adapters::toggle_startup_item(&id, enable)).await
+}
+
+#[tauri::command]
+async fn run_health_check(app: AppHandle) -> CmdResult<tidybeam_core::health_boost::HealthReport> {
+    let home = home(&app);
+    blocking(move || {
+        let monitor = app.state::<tidybeam_core::system_monitor::MonitorState>();
+        let cleaner = app.state::<tidybeam_core::cleaner::CleanerSession>();
+        Ok(tidybeam_core::health_boost::run_health_check(
+            &home, &monitor, &cleaner,
+        ))
+    })
+    .await
+}
+
+// ---------- Phase 4: Dev Bloat, Shredder, Custom Cleaners & Audit Log ----------
+
+struct AuditState(Mutex<Option<Arc<tidybeam_core::audit_log::AuditLogDb>>>);
+
+impl Default for AuditState {
+    fn default() -> Self {
+        Self(Mutex::new(None))
+    }
+}
+
+fn audit_db(app: &AppHandle) -> Option<Arc<tidybeam_core::audit_log::AuditLogDb>> {
+    let state = app.state::<AuditState>();
+    let mut slot = state.0.lock().ok()?;
+    if let Some(db) = slot.as_ref() {
+        return Some(db.clone());
+    }
+    let directory = app.path().app_local_data_dir().ok()?;
+    fs::create_dir_all(&directory).ok()?;
+    let db = Arc::new(
+        tidybeam_core::audit_log::AuditLogDb::open(&directory.join("audit-log.sqlite3")).ok()?,
+    );
+    *slot = Some(db.clone());
+    Some(db)
+}
+
+#[tauri::command]
+async fn scan_dev_bloat(
+    app: AppHandle,
+    path: String,
+    inactive_days: u64,
+) -> CmdResult<Vec<tidybeam_core::dev_bloat::DevBloatItem>> {
+    let root = resolve(&app, &path)?;
+    blocking(move || {
+        Ok(tidybeam_core::dev_bloat::scan_dev_bloat(
+            &root,
+            inactive_days,
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn shred_paths(app: AppHandle, paths: Vec<String>, passes: u8) -> CmdResult<usize> {
+    let db = audit_db(&app);
+    blocking(move || {
+        let mut count = 0usize;
+        for raw in &paths {
+            let p = Path::new(raw);
+            if platform::is_protected(p) {
+                return Err(format!(
+                    "{} is protected and cannot be shredded",
+                    p.display()
+                ));
+            }
+            count += tidybeam_core::shredder::shred_path(p, passes)?;
+        }
+        if let Some(db) = db {
+            db.record(
+                "shred",
+                &format!("Shredded {} item(s) ({passes} passes)", paths.len()),
+                0,
+                count as u64,
+            );
+        }
+        Ok(count)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn wipe_free_space(app: AppHandle, path: String, max_mb: u64) -> CmdResult<u64> {
+    let dir = resolve(&app, &path)?;
+    let db = audit_db(&app);
+    blocking(move || {
+        let wiped = tidybeam_core::shredder::wipe_free_space_sample(&dir, max_mb)?;
+        if let Some(db) = db {
+            db.record(
+                "wipe-free-space",
+                &format!("Wiped free space on {}", dir.display()),
+                wiped,
+                1,
+            );
+        }
+        Ok(wiped)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn import_custom_cleaners(
+    path: String,
+) -> CmdResult<Vec<tidybeam_core::custom_cleaners::ImportedCleanerRule>> {
+    blocking(move || tidybeam_core::custom_cleaners::import_local_rules_file(Path::new(&path)))
+        .await
+}
+
+#[tauri::command]
+async fn list_audit_log(
+    app: AppHandle,
+    limit: Option<usize>,
+) -> CmdResult<Vec<tidybeam_core::audit_log::AuditEntry>> {
+    let db = audit_db(&app);
+    blocking(move || Ok(db.map(|d| d.list(limit.unwrap_or(50))).unwrap_or_default())).await
+}
+
+// ---------- Phase 5: App Manager, Disk Health, Backup & OS Deep-Links ----------
+
+#[tauri::command]
+async fn list_installed_apps(
+    app: AppHandle,
+) -> CmdResult<Vec<tidybeam_core::app_manager::InstalledApp>> {
+    let home = home(&app);
+    blocking(move || Ok(tidybeam_core::app_manager::list_installed_apps(&home))).await
+}
+
+#[tauri::command]
+async fn find_app_leftovers(
+    app: AppHandle,
+    app_name: String,
+) -> CmdResult<Vec<tidybeam_core::app_manager::LeftoverFolder>> {
+    let home = home(&app);
+    blocking(move || {
+        Ok(tidybeam_core::app_manager::find_app_leftovers(
+            &app_name, &home,
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_disk_health() -> CmdResult<Vec<tidybeam_core::os_maintenance::DiskHealthInfo>> {
+    blocking(move || Ok(tidybeam_core::os_maintenance::list_disk_health())).await
+}
+
+#[tauri::command]
+async fn open_os_settings(app: AppHandle, target: String) -> CmdResult<()> {
+    let uri = match target.as_str() {
+        "windows-security" if cfg!(windows) => "windowsdefender:",
+        "windows-update" if cfg!(windows) => "ms-settings:windowsupdate",
+        "windows-startup" if cfg!(windows) => "ms-settings:startupapps",
+        "windows-apps" if cfg!(windows) => "ms-settings:appsfeatures",
+        "macos-update" if cfg!(target_os = "macos") => {
+            "x-apple.systempreferences:com.apple.Software-Update-Settings.extension"
+        }
+        "macos-privacy" if cfg!(target_os = "macos") => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        }
+        _ => return Err("OS settings shortcut is not applicable on this platform".into()),
+    };
+    let uri = uri.to_string();
+    blocking(move || {
+        app.opener()
+            .open_url(uri, None::<&str>)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn backup_folder(
+    app: AppHandle,
+    source: String,
+    destination_dir: String,
+    archive_name: String,
+) -> CmdResult<String> {
+    let src = resolve(&app, &source)?;
+    let dst = resolve(&app, &destination_dir)?;
+    let db = audit_db(&app);
+    blocking(move || {
+        let out = archive::create(&[platform::path_string(&src)], &dst, &archive_name)?;
+        if let Some(db) = db {
+            db.record(
+                "backup",
+                &format!("Backed up {} to {out}", src.display()),
+                0,
+                1,
+            );
+        }
+        Ok(out)
+    })
+    .await
 }
 
 // ---------- Archives ----------
@@ -852,6 +1313,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(DirectorySnapshots::default())
+        .manage(analysis::AnalysisSnapshots::default())
+        .manage(analysis::AnalysisTasks::default())
+        .manage(AnalysisCacheState::default())
+        .manage(tidybeam_core::cleaner::CleanerSession::default())
+        .manage(tidybeam_core::system_monitor::MonitorState::default())
+        .manage(AuditState::default())
         .manage(IndexState {
             db: Mutex::new(None),
             watchers: Arc::new(IndexWatchers::default()),
@@ -873,6 +1340,11 @@ pub fn run() {
                     Ok(db) => index::restore(db, handle.state::<IndexState>().watchers.clone()),
                     Err(error) => eprintln!("TidyBeam couldn't open the search index: {error}"),
                 }
+                // Low-priority idle warmup for deep cleanup totals
+                platform::lower_thread_priority();
+                let sess = handle.state::<tidybeam_core::cleaner::CleanerSession>();
+                let _ =
+                    tidybeam_core::cleaner::scan_deep_cleanup(&home(&handle), Some(&sess), |_| {});
             });
             Ok(())
         })
@@ -882,6 +1354,8 @@ pub fn run() {
             list_drives,
             path_info,
             list_entries,
+            list_entries_range,
+            thumbnail_path,
             compare_folders,
             read_text_preview,
             open_item,
@@ -902,8 +1376,32 @@ pub fn run() {
             apply_rule,
             delete_rule,
             analyze_folder,
+            get_cached_analysis,
+            cancel_analysis,
             find_duplicates,
             scan_cleanup,
+            scan_deep_cleanup,
+            get_cleaner_items,
+            clean_rules,
+            vacuum_sqlite_targets,
+            clean_cookies_whitelist,
+            empty_os_trash,
+            system_snapshot,
+            list_processes,
+            terminate_process,
+            list_startup_items,
+            toggle_startup_item,
+            run_health_check,
+            scan_dev_bloat,
+            shred_paths,
+            wipe_free_space,
+            import_custom_cleaners,
+            list_audit_log,
+            list_installed_apps,
+            find_app_leftovers,
+            list_disk_health,
+            open_os_settings,
+            backup_folder,
             list_archive,
             extract_archive,
             create_zip,

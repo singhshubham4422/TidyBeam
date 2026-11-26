@@ -7,6 +7,30 @@ import { FileIcon } from "./FileIcon";
 const PAGE = 200;
 const TILE_WIDTH = 120;
 const THUMB_MAX_BYTES = 40 * 1024 * 1024;
+const thumbCache = new Map<string, string>();
+
+function GridThumb({ entry }: { entry: FileEntry }) {
+  const [src, setSrc] = useState<string | null>(() => thumbCache.get(entry.path) ?? null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (src || failed) return;
+    let alive = true;
+    void api.thumbnailPath(entry.path)
+      .then(thumb => {
+        if (!alive) return;
+        const url = assetUrl(thumb);
+        if (thumbCache.size > 500) thumbCache.clear();
+        thumbCache.set(entry.path, url);
+        setSrc(url);
+      })
+      .catch(() => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, [entry.path, src, failed]);
+
+  if (failed || !src) return <FileIcon entry={entry} size={32} />;
+  return <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setFailed(true)} />;
+}
 
 export type Selection = Map<string, FileEntry>;
 
@@ -122,16 +146,30 @@ export function FileList(props: Props) {
     } else if (mode === "range" && anchor.current !== null) {
       const [from, to] = [Math.min(anchor.current, index), Math.max(anchor.current, index)];
       const next = new Map<string, FileEntry>();
+      let missing = false;
       for (let i = from; i <= to; i++) {
         const item = entryAt(i);
         if (item) next.set(item.path, item);
+        else missing = true;
       }
-      onSelectionChange(next);
+      if (!missing) {
+        onSelectionChange(next);
+      } else {
+        const reqEpoch = epoch.current;
+        void api.listEntriesRange({ path, offset: from, limit: to - from + 1, showHidden, sort, descending, filter })
+          .then(res => {
+            if (reqEpoch !== epoch.current) return;
+            const full = new Map<string, FileEntry>();
+            res.entries.forEach(item => full.set(item.path, item));
+            onSelectionChange(full);
+          })
+          .catch(() => onSelectionChange(next));
+      }
     } else {
       anchor.current = index;
       onSelectionChange(new Map([[entry.path, entry]]));
     }
-  }, [entryAt, selection, onSelectionChange]);
+  }, [entryAt, selection, onSelectionChange, path, showHidden, sort, descending, filter]);
 
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (!count) return;
@@ -151,9 +189,21 @@ export function FileList(props: Props) {
       if (entry) { event.preventDefault(); onOpen(entry); }
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
       event.preventDefault();
-      const next = new Map<string, FileEntry>();
-      Object.values(data.pages).flat().forEach(item => next.set(item.path, item));
-      onSelectionChange(next);
+      const loaded = Object.values(data.pages).flat();
+      if (loaded.length >= count) {
+        const next = new Map<string, FileEntry>();
+        loaded.forEach(item => next.set(item.path, item));
+        onSelectionChange(next);
+      } else {
+        const reqEpoch = epoch.current;
+        void api.listEntriesRange({ path, offset: 0, limit: count, showHidden, sort, descending, filter })
+          .then(res => {
+            if (reqEpoch !== epoch.current) return;
+            const next = new Map<string, FileEntry>();
+            res.entries.forEach(item => next.set(item.path, item));
+            onSelectionChange(next);
+          });
+      }
     } else if (event.key === "Escape" && selection.size) {
       onSelectionChange(new Map());
     }
@@ -237,7 +287,7 @@ export function FileList(props: Props) {
                     const thumb = !entry.is_dir && IMAGE_EXTENSIONS.has(entry.extension) && entry.size < THUMB_MAX_BYTES;
                     return (
                       <div key={entry.path} className={`tile ${selected ? "selected" : ""} ${props.cutPaths.has(entry.path) ? "cut" : ""}`} role="option" aria-selected={selected} title={entry.name} onClick={clickHandler(index)} onDoubleClick={() => onOpen(entry)}>
-                        <span className="thumb">{thumb ? <img src={assetUrl(entry.path)} alt="" loading="lazy" decoding="async" draggable={false} onError={event => { event.currentTarget.style.display = "none"; }} /> : <FileIcon entry={entry} size={32} />}</span>
+                        <span className="thumb">{thumb ? <GridThumb entry={entry} /> : <FileIcon entry={entry} size={32} />}</span>
                         <span className="label">{entry.name}</span>
                       </div>
                     );

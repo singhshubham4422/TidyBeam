@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Eye, LoaderCircle, Pause, Play, RefreshCw, Search, Trash2 } from "lucide-react";
-import { api, errorText, fmtBytes, fmtDate, type FileEntry, type IndexRoot } from "../api";
+import { api, errorText, fmtBytes, fmtDate, sameOrDescendant, type FileEntry, type IndexRoot } from "../api";
 import type { ConfirmOptions } from "../components/Dialogs";
 import { FileIcon } from "../components/FileIcon";
 
@@ -52,7 +52,7 @@ export function SearchView({ currentPath, notify, confirm, onOpen, onReveal }: P
     return () => { current = false; window.clearTimeout(timer); };
   }, [query, scoped, currentPath, notify]);
 
-  const currentIndexed = roots?.some(r => currentPath.toLowerCase().startsWith(r.root.toLowerCase()));
+  const currentIndexed = roots?.some(r => sameOrDescendant(currentPath, r.root));
 
   return (
     <div className="tool">

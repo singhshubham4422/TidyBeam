@@ -1,0 +1,11 @@
+[package]
+name = "tidybeam-cli"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+serde_json = "1"
+tidybeam-core = { path = "../tidybeam-core" }
+trash = "5"

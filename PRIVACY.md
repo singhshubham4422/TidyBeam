@@ -1,6 +1,6 @@
 # TidyBeam privacy policy
 
-_Last updated: November 24, 2026_
+_Last updated: November 26, 2026_
 
 TidyBeam is a file manager that runs entirely on your computer. This policy applies to the TidyBeam app distributed through the Microsoft Store, GitHub Releases and any other channel.
 
@@ -17,8 +17,8 @@ TidyBeam is a file manager that runs entirely on your computer. This policy appl
 
 To work, TidyBeam keeps a few things locally in your user profile. None of it leaves your device:
 
-- **Search index:** if you index a folder, TidyBeam stores the names, sizes and dates of the files in it (never their contents) in a local database in your app-data folder. You can remove indexed folders at any time in **Search**.
-- **Settings:** your theme, favorites, open tabs, organize rules and recent transfer history.
+- **Search index & caches:** if you index a folder or run a storage/duplicate scan, TidyBeam stores file names, sizes, dates, and local file hashes (never file contents) in local databases in your app-data folder. You can remove indexed folders at any time in **Search**.
+- **Settings & audit log:** your theme, favorites, open tabs, organize rules, recent transfer history, and local cleanup audit log.
 
 Uninstalling TidyBeam removes the app; you can delete the app-data folder to remove this local data too.
 

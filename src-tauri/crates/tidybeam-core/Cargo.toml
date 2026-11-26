@@ -1,0 +1,25 @@
+[package]
+name = "tidybeam-core"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+rayon = "1"
+rusqlite = { version = "0.43", features = ["bundled-full", "fallible_uint"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sysinfo = "0.37"
+walkdir = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

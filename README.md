@@ -4,8 +4,8 @@
 
 # TidyBeam
 
-**A fast, simple file manager for Windows, macOS and Linux.**
-Everything runs on your computer — no account, no telemetry, no network.
+**Clean storage, faster systems, effortless files — across Windows, macOS, and Linux.**
+Everything runs on your device — no account, no telemetry, no cloud.
 
 [![CI](https://github.com/singhshubham4422/TidyBeam/actions/workflows/ci.yml/badge.svg)](https://github.com/singhshubham4422/TidyBeam/actions/workflows/ci.yml)
 [![Latest release](https://img.shields.io/github/v/release/singhshubham4422/TidyBeam?include_prereleases&sort=semver&label=release)](https://github.com/singhshubham4422/TidyBeam/releases)

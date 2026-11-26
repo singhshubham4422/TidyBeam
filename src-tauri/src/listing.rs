@@ -138,7 +138,11 @@ fn read_folder(directory: &Path, show_hidden: bool) -> Result<Vec<FileEntry>, St
         .collect())
 }
 
-fn page(snapshot: &mut Snapshot, request: &ListRequest) -> ListResult {
+fn slice_from_snapshot(
+    snapshot: &mut Snapshot,
+    request: &ListRequest,
+    max_limit: usize,
+) -> ListResult {
     let key = (request.sort, request.descending);
     let order = match snapshot.orders.get(&key) {
         Some(order) => order.clone(),
@@ -149,7 +153,7 @@ fn page(snapshot: &mut Snapshot, request: &ListRequest) -> ListResult {
         }
     };
     let filter = request.filter.trim().to_lowercase();
-    let limit = request.limit.clamp(1, 1000);
+    let limit = request.limit.clamp(1, max_limit);
     if filter.is_empty() {
         return ListResult {
             total: order.len(),
@@ -181,6 +185,23 @@ pub fn list_entries(
     directory: &Path,
     request: ListRequest,
 ) -> Result<ListResult, String> {
+    list_entries_capped(snapshots, directory, request, 1000)
+}
+
+pub fn list_entries_range(
+    snapshots: &DirectorySnapshots,
+    directory: &Path,
+    request: ListRequest,
+) -> Result<ListResult, String> {
+    list_entries_capped(snapshots, directory, request, SNAPSHOT_MAX_ENTRIES)
+}
+
+fn list_entries_capped(
+    snapshots: &DirectorySnapshots,
+    directory: &Path,
+    request: ListRequest,
+    max_limit: usize,
+) -> Result<ListResult, String> {
     let metadata = fs::metadata(directory)
         .map_err(|e| format!("Folder is unavailable: {} ({e})", directory.display()))?;
     if !metadata.is_dir() {
@@ -205,7 +226,7 @@ pub fn list_entries(
                 && now.duration_since(snapshot.created_at) < SNAPSHOT_TTL
             {
                 snapshot.last_access = now;
-                return Ok(page(snapshot, &request));
+                return Ok(slice_from_snapshot(snapshot, &request, max_limit));
             }
             cache.remove(&key);
         }
@@ -221,7 +242,7 @@ pub fn list_entries(
         created_at: now,
         last_access: now,
     };
-    let result = page(&mut snapshot, &request);
+    let result = slice_from_snapshot(&mut snapshot, &request, max_limit);
     if snapshot.entries.len() <= SNAPSHOT_MAX_ENTRIES {
         let mut cache = snapshots
             .0
@@ -243,6 +264,41 @@ pub fn list_entries(
         cache.insert(key, snapshot);
     }
     Ok(result)
+}
+
+/// Generates (or returns cached) 256px JPEG thumbnail path for Grid View so WebView
+/// never decodes 40 MB raw images into GPU memory.
+pub fn thumbnail_path(source: &Path, cache_dir: &Path) -> Result<String, String> {
+    let meta = fs::metadata(source).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Not a file".into());
+    }
+    let mtime = platform::modified_secs(&meta);
+    let key_input = format!(
+        "{}|{}|{}",
+        platform::normalized_key(source),
+        meta.len(),
+        mtime
+    );
+    let hash = xxhash_rust::xxh3::xxh3_64(key_input.as_bytes());
+    let thumb_file = cache_dir.join(format!("{hash:016x}.jpg"));
+    if thumb_file.is_file() {
+        return Ok(platform::path_string(&thumb_file));
+    }
+    fs::create_dir_all(cache_dir).map_err(|e| e.to_string())?;
+    let img = image::ImageReader::open(source)
+        .map_err(|e| e.to_string())?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())?;
+    let thumb = img.thumbnail(256, 256).to_rgb8();
+    let tmp = cache_dir.join(format!("{hash:016x}.{}.tmp", std::process::id()));
+    thumb
+        .save_with_format(&tmp, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    let _ = fs::rename(&tmp, &thumb_file);
+    Ok(platform::path_string(&thumb_file))
 }
 
 #[derive(Serialize)]

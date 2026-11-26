@@ -234,6 +234,21 @@ fn copy_file(
         } else {
             fs::copy(source, destination).map_err(|e| format!("{}: {e}", source.display()))?;
             observer.bytes(metadata.len());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = metadata.permissions();
+                if perms.readonly() {
+                    let mut writable = perms.clone();
+                    writable.set_mode(perms.mode() | 0o200);
+                    let _ = fs::set_permissions(destination, writable);
+                    copy_times(metadata, destination);
+                    let _ = fs::set_permissions(destination, perms);
+                } else {
+                    copy_times(metadata, destination);
+                }
+            }
+            #[cfg(not(unix))]
             copy_times(metadata, destination);
         }
         Ok(())
@@ -300,17 +315,37 @@ pub fn copy_tree(
 }
 
 pub fn path_size(path: &Path) -> u64 {
+    path_size_cancellable(path, &std::sync::atomic::AtomicBool::new(false)).unwrap_or(0)
+}
+
+pub fn path_size_cancellable(
+    path: &Path,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<u64, String> {
+    if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("Cancelled".into());
+    }
     match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => meta.len(),
-        Ok(meta) if meta.is_dir() => walkdir::WalkDir::new(path)
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .filter_map(|entry| entry.metadata().ok())
-            .map(|meta| meta.len())
-            .fold(0u64, u64::saturating_add),
-        _ => 0,
+        Ok(meta) if meta.is_file() => Ok(meta.len()),
+        Ok(meta) if meta.is_dir() => {
+            let mut total = 0u64;
+            for entry in walkdir::WalkDir::new(path)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    return Err("Cancelled".into());
+                }
+                if entry.file_type().is_file()
+                    && let Ok(meta) = entry.metadata()
+                {
+                    total = total.saturating_add(meta.len());
+                }
+            }
+            Ok(total)
+        }
+        _ => Ok(0),
     }
 }
 
@@ -371,11 +406,14 @@ fn plan_target(
 fn move_item(
     source: &Path,
     target: &Path,
+    precomputed_size: Option<u64>,
     observer: &mut CountingObserver<'_>,
 ) -> Result<(), String> {
     match fs::rename(source, target) {
         Ok(()) => {
-            observer.inner.bytes(path_size(target));
+            observer
+                .inner
+                .bytes(precomputed_size.unwrap_or_else(|| path_size(target)));
             Ok(())
         }
         Err(error) if platform::is_cross_device(&error) => {
@@ -429,12 +467,23 @@ pub fn run(
     conflict: Conflict,
     observer: &mut dyn CopyObserver,
 ) -> Result<TransferSummary, String> {
+    let items: Vec<(String, Option<u64>)> = sources.iter().map(|s| (s.clone(), None)).collect();
+    run_with_sizes(&items, destination, moving, conflict, observer)
+}
+
+pub fn run_with_sizes(
+    sources: &[(String, Option<u64>)],
+    destination: &Path,
+    moving: bool,
+    conflict: Conflict,
+    observer: &mut dyn CopyObserver,
+) -> Result<TransferSummary, String> {
     if !destination.is_dir() {
         return Err("Destination folder is unavailable".into());
     }
     let canonical_destination = platform::canonical(destination).map_err(|e| e.to_string())?;
     let mut summary = TransferSummary::default();
-    for raw in sources {
+    for (raw, size_hint) in sources {
         observer.checkpoint()?;
         let source = PathBuf::from(raw);
         observer.item_started(&source.file_name().unwrap_or_default().to_string_lossy());
@@ -455,7 +504,7 @@ pub fn run(
             skipped_links: 0,
         };
         if moving {
-            move_item(&source, &target, &mut counting)?;
+            move_item(&source, &target, *size_hint, &mut counting)?;
         } else {
             copy_tree(&source, &target, &mut counting)?;
         }

@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "crates/tidybeam-core", "crates/tidybeam-cli"]
+
 [package]
 name = "tidybeam"
 version = "0.3.0"
@@ -22,17 +25,29 @@ tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+blake3 = "1"
 dunce = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "ico"] }
 jwalk = "0.9"
 notify = "8"
 rayon = "1"
 rusqlite = { version = "0.43", features = ["bundled-full", "fallible_uint"] }
-sha2 = "0.11"
 sysinfo = "0.37"
+tidybeam-core = { path = "crates/tidybeam-core" }
 trash = "5"
 walkdir = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

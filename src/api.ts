@@ -14,7 +14,25 @@ export type FileEntry = {
 export type SortKey = "name" | "size" | "modified" | "kind";
 export type ListResult = { entries: FileEntry[]; total: number };
 export type PathInfo = { path: string; parent: string | null; segments: { name: string; path: string }[] };
-export type PlatformInfo = { os: "windows" | "macos" | "linux"; trashName: string; separator: string; home: string; version: string };
+export type RuntimeCapabilities = {
+  os: "windows" | "macos" | "linux";
+  arch: string;
+  isElevated: boolean;
+  isPackagedStore: boolean;
+  capabilities: {
+    registryClean: boolean;
+    packageManagerClean: boolean;
+    smartDiskHealth: boolean;
+    tempSensors: boolean;
+    nativeScheduler: boolean;
+    emptyWorkingSet: boolean;
+    freeSpaceWipe: boolean;
+  };
+};
+export type PlatformInfo = {
+  os: "windows" | "macos" | "linux"; trashName: string; separator: string; home: string; version: string;
+  runtime?: RuntimeCapabilities;
+};
 export type Place = { name: string; path: string; kind: string };
 export type Drive = { name: string; path: string; total: number; available: number; file_system: string; removable: boolean };
 export type TransferConflict = { source: string; destination: string; name: string; is_dir: boolean };
@@ -25,13 +43,57 @@ export type TransferProgress = {
   completedItems: number; totalItems: number; currentName: string; speedBytesPerSecond: number; message?: string | null;
 };
 export type TrashResult = { trashed: number; failed: { path: string; error: string }[] };
-export type Analysis = {
-  path: string; total_bytes: number; file_count: number; folder_count: number; largest: FileEntry[];
-  folders: { name: string; path: string; bytes: number; files: number; is_dir: boolean }[];
+export type CategoryBreakdown = {
+  media: number;
+  archives: number;
+  code: number;
+  documents: number;
+  appData: number;
+  other: number;
 };
-export type AnalysisProgress = { scanId: string; filesScanned: number; foldersScanned: number };
+export type FolderSize = { name: string; path: string; bytes: number; allocated_bytes: number; files: number; is_dir: boolean };
+export type Analysis = {
+  path: string; total_bytes: number; allocated_bytes: number; file_count: number; folder_count: number;
+  scanned_at: number; categories: CategoryBreakdown; largest: FileEntry[]; folders: FolderSize[];
+};
+export type AnalysisProgress = {
+  scanId: string; filesScanned: number; foldersScanned: number; bytesScanned: number; topFolders: FolderSize[];
+};
 export type DuplicateGroup = { hash: string; size: number; files: FileEntry[] };
 export type CleanupCandidate = { name: string; path: string; category: string; bytes: number; item_count: number; modified: number };
+export type SafetyBadge = "safe" | "sessionReset" | "appOpen" | "permanent";
+export type CleanerFileItem = { name: string; path: string; bytes: number; modified: number };
+export type CleanerRuleSummary = {
+  id: string; name: string; category: string; description: string; badge: SafetyBadge;
+  appRunning: boolean; runningProcess?: string | null; totalBytes: number; itemCount: number;
+  sqliteTargets: string[]; cookieDbs: string[];
+};
+export type SystemSnapshot = {
+  osName: string; kernelVersion: string; hostName: string; cpuBrand: string; cpuUsage: number; coreCount: number;
+  cores: { name: string; usage: number }[]; memTotal: number; memUsed: number; memAvailable: number;
+  swapTotal: number; swapUsed: number; uptimeSecs: number;
+  networks: { name: string; receivedBytes: number; transmittedBytes: number }[];
+  temperatures: { label: string; celsius: number }[];
+};
+export type ProcessEntry = {
+  pid: number; parentPid?: number | null; name: string; cpuUsage: number; memoryBytes: number;
+  status: string; exePath: string; protected: boolean;
+};
+export type StartupItem = { id: string; name: string; command: string; scope: string; enabled: boolean; path: string };
+export type HealthPillar = {
+  id: string; title: string; status: "good" | "review" | "attention"; summary: string;
+  reclaimableBytes: number; fixable: boolean;
+};
+export type HealthReport = { score: number; totalReclaimable: number; pillars: HealthPillar[] };
+export type DevBloatItem = { name: string; path: string; kind: string; bytes: number; modified: number };
+export type ImportedCleanerRule = { name: string; section: string; sourceFormat: string; osCompat: string[]; targets: string[] };
+export type AuditEntry = { id: number; timestamp: number; action: string; summary: string; bytesReclaimed: number; itemsCount: number };
+export type InstalledApp = { name: string; version: string; publisher: string; location: string; source: string };
+export type LeftoverFolder = { name: string; path: string; bytes: number };
+export type DiskHealthInfo = {
+  name: string; mountPoint: string; fileSystem: string; kind: string;
+  totalBytes: number; availableBytes: number; usedPct: number; removable: boolean; status: string;
+};
 export type ArchiveEntry = { name: string; path: string; is_dir: boolean; size: number; compressed_size: number };
 export type IndexStatus = { root: string; indexed: number; watching: boolean; watch_error?: string | null };
 export type IndexRoot = { root: string; watch: boolean; watching: boolean; indexed: number; indexedAt: number };
@@ -50,6 +112,9 @@ export const api = {
   pathInfo: (path: string) => invoke<PathInfo>("path_info", { path }),
   listEntries: (args: { path: string; offset: number; limit: number; showHidden: boolean; sort: SortKey; descending: boolean; filter: string; force: boolean }) =>
     invoke<ListResult>("list_entries", args),
+  listEntriesRange: (args: { path: string; offset: number; limit: number; showHidden: boolean; sort: SortKey; descending: boolean; filter: string }) =>
+    invoke<ListResult>("list_entries_range", args),
+  thumbnailPath: (path: string) => invoke<string>("thumbnail_path", { path }),
   compareFolders: (left: string, right: string, showHidden: boolean) => invoke<FolderComparison>("compare_folders", { left, right, showHidden }),
   readTextPreview: (path: string) => invoke<{ text: string; truncated: boolean }>("read_text_preview", { path }),
   openItem: (path: string, confirmed = false) => invoke<void>("open_item", { path, confirmed }),
@@ -70,9 +135,34 @@ export const api = {
   previewRule: (id: string) => invoke<RulePreview>("preview_rule", { id }),
   applyRule: (id: string, selected: string[]) => invoke<TransferSummary>("apply_rule", { id, selected }),
   deleteRule: (id: string) => invoke<OrganizeRule[]>("delete_rule", { id }),
-  analyzeFolder: (path: string, scanId: string) => invoke<Analysis>("analyze_folder", { path, scanId }),
+  analyzeFolder: (path: string, scanId: string, force = false) => invoke<Analysis>("analyze_folder", { path, scanId, force }),
+  getCachedAnalysis: (path: string) => invoke<Analysis | null>("get_cached_analysis", { path }),
+  cancelAnalysis: (scanId: string) => invoke<void>("cancel_analysis", { scanId }),
   findDuplicates: (path: string) => invoke<DuplicateGroup[]>("find_duplicates", { path }),
   scanCleanup: () => invoke<CleanupCandidate[]>("scan_cleanup"),
+  scanDeepCleanup: (force = false) => invoke<CleanerRuleSummary[]>("scan_deep_cleanup", { force }),
+  getCleanerItems: (ruleId: string, offset: number, limit: number) => invoke<CleanerFileItem[]>("get_cleaner_items", { ruleId, offset, limit }),
+  cleanRules: (ruleIds: string[], permanent = false) => invoke<TrashResult>("clean_rules", { ruleIds, permanent }),
+  vacuumSqliteTargets: (paths: string[]) => invoke<number>("vacuum_sqlite_targets", { paths }),
+  cleanCookiesWhitelist: (paths: string[], whitelist: string[]) => invoke<number>("clean_cookies_whitelist", { paths, whitelist }),
+  emptyOsTrash: () => invoke<void>("empty_os_trash"),
+  systemSnapshot: () => invoke<SystemSnapshot>("system_snapshot"),
+  listProcesses: () => invoke<ProcessEntry[]>("list_processes"),
+  terminateProcess: (pid: number) => invoke<void>("terminate_process", { pid }),
+  listStartupItems: () => invoke<StartupItem[]>("list_startup_items"),
+  toggleStartupItem: (id: string, enable: boolean) => invoke<void>("toggle_startup_item", { id, enable }),
+  runHealthCheck: () => invoke<HealthReport>("run_health_check"),
+  scanDevBloat: (path: string, inactiveDays: number) => invoke<DevBloatItem[]>("scan_dev_bloat", { path, inactiveDays }),
+  shredPaths: (paths: string[], passes: number) => invoke<number>("shred_paths", { paths, passes }),
+  wipeFreeSpace: (path: string, maxMb: number) => invoke<number>("wipe_free_space", { path, maxMb }),
+  importCustomCleaners: (path: string) => invoke<ImportedCleanerRule[]>("import_custom_cleaners", { path }),
+  listAuditLog: (limit?: number) => invoke<AuditEntry[]>("list_audit_log", { limit }),
+  listInstalledApps: () => invoke<InstalledApp[]>("list_installed_apps"),
+  findAppLeftovers: (appName: string) => invoke<LeftoverFolder[]>("find_app_leftovers", { appName }),
+  listDiskHealth: () => invoke<DiskHealthInfo[]>("list_disk_health"),
+  openOsSettings: (target: string) => invoke<void>("open_os_settings", { target }),
+  backupFolder: (source: string, destinationDir: string, archiveName: string) =>
+    invoke<string>("backup_folder", { source, destinationDir, archiveName }),
   listArchive: (path: string) => invoke<ArchiveEntry[]>("list_archive", { path }),
   extractArchive: (path: string, destination: string) => invoke<number>("extract_archive", { path, destination }),
   createZip: (paths: string[], destination: string, archiveName: string) => invoke<string>("create_zip", { paths, destination, archiveName }),
@@ -117,6 +207,18 @@ export const TEXT_EXTENSIONS = new Set([
 export const ARCHIVE_EXTENSIONS = new Set(["zip"]);
 
 export const assetUrl = (path: string) => convertFileSrc(path);
+
+/** Separator-aware, OS-case-normalized containment check (prevents sibling prefix matches). */
+export const sameOrDescendant = (path: string, parent: string, os: PlatformInfo["os"] = "windows") => {
+  const clean = (p: string) => (p.length > 1 ? p.replace(/[\\/]+$/, "") : p);
+  const norm = (p: string) => (os === "linux" ? clean(p) : clean(p).toLowerCase());
+  const a = norm(path);
+  const b = norm(parent);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (b.endsWith("/") || b.endsWith("\\")) return a.startsWith(b);
+  return a.startsWith(`${b}/`) || a.startsWith(`${b}\\`);
+};
 
 export const kindLabel = (entry: FileEntry) => {
   if (entry.is_dir) return "Folder";

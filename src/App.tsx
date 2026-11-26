@@ -23,6 +23,9 @@ import { RulesView } from "./views/RulesView";
 import { SearchView } from "./views/SearchView";
 import { SettingsView } from "./views/SettingsView";
 import { StorageView } from "./views/StorageView";
+import { HealthView, MonitorView, ProcessView, StartupView } from "./views/SystemViews";
+import { AuditLogView, CustomCleanersView, DevBloatView, PrivacyShredView } from "./views/Phase4Views";
+import { AppsView, OsToolsBackupView } from "./views/Phase5Views";
 
 type Tab = { id: number; history: string[]; index: number };
 type Notice = { kind: "success" | "error"; text: string; action?: { label: string; run: () => void } };
@@ -147,8 +150,21 @@ export default function App() {
   useEffect(() => { setFilterInput(""); setFilter(""); }, [path]);
 
   // Pick up changes made outside the app when the window regains focus.
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const staleFiles = useRef(false);
   useEffect(() => {
-    const onFocus = () => { refresh(); void api.listDrives().then(setDrives).catch(() => undefined); };
+    if (view === "files" && staleFiles.current) {
+      staleFiles.current = false;
+      refresh();
+    }
+  }, [view, refresh]);
+  useEffect(() => {
+    const onFocus = () => {
+      if (viewRef.current === "files") refresh();
+      else staleFiles.current = true;
+      void api.listDrives().then(setDrives).catch(() => undefined);
+    };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [refresh]);
@@ -210,12 +226,14 @@ export default function App() {
   const revealEntry = useCallback((entry: FileEntry) => { api.revealItem(entry.path).catch(e => notify("error", errorText(e))); }, [notify]);
 
   // ---------- Trash ----------
-  const trash = useCallback(async (paths: string[], what: string) => {
-    if (!paths.length) return false;
-    if (settings.confirmTrash && !(await dialogs.confirm({ title: `Move ${what} to the ${trashName}?`, body: `You can restore ${paths.length === 1 ? "it" : "them"} from the ${trashName}.`, confirmLabel: `Move to ${trashName}` }))) return false;
+  const trash = useCallback(async (paths: string[], what: string): Promise<string[]> => {
+    if (!paths.length) return [];
+    if (settings.confirmTrash && !(await dialogs.confirm({ title: `Move ${what} to the ${trashName}?`, body: `You can restore ${paths.length === 1 ? "it" : "them"} from the ${trashName}.`, confirmLabel: `Move to ${trashName}` }))) return [];
     setBusy(true);
     try {
       const result = await api.trashPaths(paths);
+      const failedSet = new Set(result.failed.map(f => f.path));
+      const removed = paths.filter(p => !failedSet.has(p));
       if (result.failed.length) {
         const ok = await dialogs.confirm({
           title: `${result.failed.length} item${result.failed.length === 1 ? "" : "s"} couldn't go to the ${trashName}`,
@@ -224,12 +242,15 @@ export default function App() {
           cancelLabel: "Keep",
           danger: true,
         });
-        if (ok) await api.deletePermanently(result.failed.map(f => f.path));
+        if (ok) {
+          await api.deletePermanently(result.failed.map(f => f.path));
+          removed.push(...result.failed.map(f => f.path));
+        }
       }
       if (result.trashed) notify("success", `Moved ${result.trashed} item${result.trashed === 1 ? "" : "s"} to the ${trashName}`);
       refresh();
-      return true;
-    } catch (e) { notify("error", errorText(e)); refresh(); return false; }
+      return removed;
+    } catch (e) { notify("error", errorText(e)); refresh(); return []; }
     finally { setBusy(false); }
   }, [settings.confirmTrash, dialogs, trashName, notify, refresh]);
 
@@ -293,7 +314,10 @@ export default function App() {
     const taskId = crypto.randomUUID();
     const progress: TransferProgress = { taskId, status: "queued", completedBytes: 0, totalBytes: 0, completedItems: 0, totalItems: sources.length, currentName: "Preparing…", speedBytesPerSecond: 0 };
     setTasks(old => Object.fromEntries([...Object.entries(old), [taskId, { move, destination, count: sources.length, progress }]].slice(-20)));
-    try { await api.startTransfer(taskId, sources, destination, move, conflict); }
+    try {
+      await api.startTransfer(taskId, sources, destination, move, conflict);
+      if (move) setClipboard(old => (old?.cut ? null : old));
+    }
     catch (e) { setTasks(old => { const next = { ...old }; delete next[taskId]; return next; }); notify("error", errorText(e)); }
   };
   const beginTransfer = async (sources: string[], destination: string, move: boolean) => {
@@ -307,7 +331,6 @@ export default function App() {
   const paste = async () => {
     if (!clipboard) return;
     await beginTransfer(clipboard.entries.map(e => e.path), activeFolder, clipboard.cut);
-    if (clipboard.cut) setClipboard(null);
   };
   const cutPaths = useMemo(() => new Set(clipboard?.cut ? clipboard.entries.map(e => e.path) : []), [clipboard]);
 
@@ -564,12 +587,55 @@ export default function App() {
           </button>
         </header>
 
+        {(view === "health" || view === "cleanup" || view === "storage" || view === "duplicates" || view === "devbloat") && (
+          <div className="toolbar" style={{ paddingBottom: 0 }}>
+            <div className="seg" role="tablist" aria-label="Storage and Cleanup">
+              <button type="button" aria-pressed={view === "health"} onClick={() => setView("health")}>Health Overview</button>
+              <button type="button" aria-pressed={view === "cleanup"} onClick={() => setView("cleanup")}>Deep Clean</button>
+              <button type="button" aria-pressed={view === "storage"} onClick={() => setView("storage")}>Space Analyzer</button>
+              <button type="button" aria-pressed={view === "duplicates"} onClick={() => setView("duplicates")}>Duplicates</button>
+              <button type="button" aria-pressed={view === "devbloat"} onClick={() => setView("devbloat")}>Dev & Large Files</button>
+            </div>
+          </div>
+        )}
+        {(view === "monitor" || view === "startup" || view === "processes" || view === "apps" || view === "ostools" || view === "privacy") && (
+          <div className="toolbar" style={{ paddingBottom: 0 }}>
+            <div className="seg" role="tablist" aria-label="System and Boost">
+              <button type="button" aria-pressed={view === "monitor"} onClick={() => setView("monitor")}>Live Monitor</button>
+              <button type="button" aria-pressed={view === "startup"} onClick={() => setView("startup")}>Startup Apps</button>
+              <button type="button" aria-pressed={view === "processes"} onClick={() => setView("processes")}>Processes</button>
+              <button type="button" aria-pressed={view === "apps"} onClick={() => setView("apps")}>Installed Apps</button>
+              <button type="button" aria-pressed={view === "ostools"} onClick={() => setView("ostools")}>Disk & Backup</button>
+              <button type="button" aria-pressed={view === "privacy"} onClick={() => setView("privacy")}>Privacy & Shredder</button>
+            </div>
+          </div>
+        )}
+        {(view === "rules" || view === "customclean" || view === "audit") && (
+          <div className="toolbar" style={{ paddingBottom: 0 }}>
+            <div className="seg" role="tablist" aria-label="Automate">
+              <button type="button" aria-pressed={view === "rules"} onClick={() => setView("rules")}>Organize Rules</button>
+              <button type="button" aria-pressed={view === "customclean"} onClick={() => setView("customclean")}>Custom Cleaners</button>
+              <button type="button" aria-pressed={view === "audit"} onClick={() => setView("audit")}>History Log</button>
+            </div>
+          </div>
+        )}
+
         {view === "files" && fileView}
         {view === "search" && <SearchView currentPath={path} notify={notify} confirm={dialogs.confirm} onOpen={entry => void openEntry(entry)} onReveal={revealEntry} />}
-        {view === "storage" && <StorageView path={path} onNavigate={navigate} onOpen={entry => void openEntry(entry)} onDuplicates={() => setView("duplicates")} />}
+        {view === "health" && <HealthView trashName={trashName} onOpenClean={() => setView("cleanup")} />}
+        {view === "storage" && <StorageView path={path} trashName={trashName} onNavigate={navigate} onOpen={entry => void openEntry(entry)} onTrash={trash} onDuplicates={() => setView("duplicates")} />}
         {view === "duplicates" && <DuplicatesView path={path} trashName={trashName} onTrash={trash} onOpen={entry => void openEntry(entry)} />}
         {view === "cleanup" && <CleanupView trashName={trashName} onTrash={trash} />}
+        {view === "devbloat" && <DevBloatView path={path} trashName={trashName} onTrash={trash} />}
+        {view === "monitor" && <MonitorView />}
+        {view === "startup" && <StartupView />}
+        {view === "processes" && <ProcessView confirm={dialogs.confirm} />}
+        {view === "apps" && <AppsView trashName={trashName} onTrash={trash} />}
+        {view === "ostools" && <OsToolsBackupView currentPath={path} platform={platform} />}
+        {view === "privacy" && <PrivacyShredView currentPath={path} confirm={dialogs.confirm} />}
         {view === "rules" && <RulesView currentPath={path} notify={notify} confirm={dialogs.confirm} onChanged={refresh} />}
+        {view === "customclean" && <CustomCleanersView />}
+        {view === "audit" && <AuditLogView />}
         {view === "settings" && <SettingsView settings={settings} update={update} platform={platform} shortcutError={shortcutError} />}
 
         <footer className="statusbar">
