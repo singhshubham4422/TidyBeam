@@ -558,12 +558,11 @@ fn scan_subtree_recursive(
             continue;
         }
         #[cfg(unix)]
-        if entry.nlink > 1 {
-            if let Ok(mut seen) = seen_inodes.lock()
-                && !seen.insert((entry.dev, entry.ino))
-            {
-                continue;
-            }
+        if entry.nlink > 1
+            && let Ok(mut seen) = seen_inodes.lock()
+            && !seen.insert((entry.dev, entry.ino))
+        {
+            continue;
         }
         let ext = Path::new(&entry.name)
             .extension()
