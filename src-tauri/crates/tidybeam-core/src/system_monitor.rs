@@ -59,22 +59,11 @@ pub struct ProcessEntry {
     pub protected: bool,
 }
 
+#[derive(Default)]
 pub struct MonitorState {
-    sys: Mutex<System>,
-    networks: Mutex<Networks>,
-    components: Mutex<Components>,
-}
-
-impl Default for MonitorState {
-    fn default() -> Self {
-        let mut sys = System::new_all();
-        sys.refresh_cpu_usage();
-        Self {
-            sys: Mutex::new(sys),
-            networks: Mutex::new(Networks::new_with_refreshed_list()),
-            components: Mutex::new(Components::new_with_refreshed_list()),
-        }
-    }
+    sys: Mutex<Option<System>>,
+    networks: Mutex<Option<Networks>>,
+    components: Mutex<Option<Components>>,
 }
 
 const PROTECTED_PROCS: &[&str] = &[
@@ -109,7 +98,12 @@ pub fn is_protected_process(pid: u32, name: &str) -> bool {
 
 impl MonitorState {
     pub fn snapshot(&self) -> SystemSnapshot {
-        let mut sys = self.sys.lock().expect("monitor lock");
+        let mut sys_guard = self.sys.lock().expect("monitor lock");
+        let sys = sys_guard.get_or_insert_with(|| {
+            let mut s = System::new_all();
+            s.refresh_cpu_usage();
+            s
+        });
         sys.refresh_cpu_all();
         sys.refresh_memory();
 
@@ -127,7 +121,8 @@ impl MonitorState {
             .map(|c| c.brand().trim().to_string())
             .unwrap_or_default();
 
-        let mut nets = self.networks.lock().expect("networks lock");
+        let mut nets_guard = self.networks.lock().expect("networks lock");
+        let nets = nets_guard.get_or_insert_with(Networks::new_with_refreshed_list);
         nets.refresh(true);
         let networks = nets
             .iter()
@@ -138,7 +133,8 @@ impl MonitorState {
             })
             .collect();
 
-        let mut comps = self.components.lock().expect("components lock");
+        let mut comps_guard = self.components.lock().expect("components lock");
+        let comps = comps_guard.get_or_insert_with(Components::new_with_refreshed_list);
         comps.refresh(true);
         let temperatures = comps
             .iter()
@@ -170,7 +166,8 @@ impl MonitorState {
     }
 
     pub fn processes(&self) -> Vec<ProcessEntry> {
-        let mut sys = self.sys.lock().expect("monitor lock");
+        let mut sys_guard = self.sys.lock().expect("monitor lock");
+        let sys = sys_guard.get_or_insert_with(System::new_all);
         sys.refresh_processes(ProcessesToUpdate::All, true);
         let mut list: Vec<ProcessEntry> = sys
             .processes()
@@ -202,7 +199,8 @@ impl MonitorState {
     }
 
     pub fn terminate_process(&self, pid: u32) -> Result<(), String> {
-        let mut sys = self.sys.lock().expect("monitor lock");
+        let mut sys_guard = self.sys.lock().expect("monitor lock");
+        let sys = sys_guard.get_or_insert_with(System::new_all);
         sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), false);
         let Some(proc_) = sys.process(Pid::from_u32(pid)) else {
             return Err("Process is no longer running".into());

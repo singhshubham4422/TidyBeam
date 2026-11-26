@@ -949,10 +949,14 @@ async fn empty_os_trash() -> CmdResult<()> {
 // ---------- System Monitor, Startup & Health ----------
 
 #[tauri::command]
-fn system_snapshot(
-    monitor: State<'_, tidybeam_core::system_monitor::MonitorState>,
-) -> tidybeam_core::system_monitor::SystemSnapshot {
-    monitor.snapshot()
+async fn system_snapshot(
+    app: AppHandle,
+) -> CmdResult<tidybeam_core::system_monitor::SystemSnapshot> {
+    blocking(move || {
+        let monitor = app.state::<tidybeam_core::system_monitor::MonitorState>();
+        Ok(monitor.snapshot())
+    })
+    .await
 }
 
 #[tauri::command]
